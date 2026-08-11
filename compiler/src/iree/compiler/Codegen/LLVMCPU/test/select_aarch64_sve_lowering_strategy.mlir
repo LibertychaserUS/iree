@@ -189,6 +189,7 @@ func.func @unpack(%arg0 : tensor<128x10x?x8x?xf32>) -> tensor<128x80x320xf32> at
 //       CHECK: func.func @unpack
 //  CHECK-SAME:     translation_info = #[[TRANSLATION]]
 //       CHECK:   linalg.unpack
+//  CHECK-SAME:       inner_tile_alignments = #iree_cpu.inner_tile_alignments<vector_common_parallel = [Unknown, Unknown, Equal]>
 //  CHECK-SAME:       lowering_config = #[[CONFIG]]
 
 // -----
@@ -210,6 +211,7 @@ func.func @unpack_outer_dynamic(%arg0 : tensor<?x?x32x?xi32>, %dim0 : index, %di
 //       CHECK: func.func @unpack_outer_dynamic
 //  CHECK-SAME:     translation_info = #[[TRANSLATION]]
 //       CHECK:   linalg.unpack
+//  CHECK-SAME:       inner_tile_alignments = #iree_cpu.inner_tile_alignments<vector_common_parallel = [Unknown, Equal]>
 //  CHECK-SAME:       lowering_config = #[[CONFIG]]
 
 // -----
@@ -255,6 +257,7 @@ func.func @unpack_with_generic(%arg0 : tensor<128x10x?x8x?xf32>, %arg1 : tensor<
 //       CHECK: func.func @unpack_with_generic
 //  CHECK-SAME:     translation_info = #[[TRANSLATION]]
 //       CHECK:   linalg.unpack
+//  CHECK-SAME:       inner_tile_alignments = #iree_cpu.inner_tile_alignments<vector_common_parallel = [Unknown, Unknown, Equal]>
 //  CHECK-SAME:       lowering_config = #[[CONFIG_UNPACK]]
 //       CHECK:   linalg.generic
 //  CHECK-SAME:       lowering_config = #[[CONFIG_GENERIC]]
@@ -469,10 +472,12 @@ func.func @mmt4d_generic_unpack_pack(%arg0: tensor<5x4096x16x1xf16>, %arg1: tens
 // CHECK-SAME:      {lowering_config = #[[$CONFIG1]]}
 // CHECK:         linalg.generic
 // CHECK-SAME:      {lowering_config = #[[$CONFIG0]]}
+// The producer unpack carries a precomputed inner-tile alignment hint.
 // CHECK:         linalg.unpack
-// CHECK-SAME:      {lowering_config = #[[$CONFIG2]]}
-// The consumer pack has no lowering config of its own; it carries the
-// precomputed inner-tile alignment hint instead.
+// CHECK-SAME:      inner_tile_alignments = #iree_cpu.inner_tile_alignments<vector_common_parallel = [Unknown, Equal]>
+// CHECK-SAME:      lowering_config = #[[$CONFIG2]]
+// The consumer pack also carries a precomputed inner-tile alignment hint and
+// has no lowering config of its own.
 // CHECK:         linalg.pack
 // CHECK-SAME:      inner_tile_alignments = #iree_cpu.inner_tile_alignments<vector_common_parallel = [Unknown, Equal]>
 // CHECK-NOT:       lowering_config

@@ -3837,6 +3837,46 @@ static void capturePackInnerTileAlignment(
   }
 }
 
+/// Captures the inner-tile alignment of a scalable `linalg.unpack` at tiling
+/// `level` from its (unpacked/dest-domain) loop tile sizes (`tileSizes` /
+/// `scalableFlags`), appending a `{level, per-dim alignments}` entry to
+/// `perLevel` when at least one scalable inner tile resolves to a non-`Unknown`
+/// alignment. Unlike the pack, the unpack's loop tile is already in the unpacked
+/// domain and carries the scalable flag, so it compares directly to the inner
+/// tile. `unpackSaf` holds the unpack's inner tiles decoded by
+/// `getScalableTileSizesAndFlags`. The distribution level is skipped for now.
+static void captureUnpackInnerTileAlignment(
+    linalg::UnPackOp unpackOp, const SizesAndScalableFlags &unpackSaf,
+    IREE::CPU::TilingLevel level, ArrayRef<int64_t> tileSizes,
+    ArrayRef<bool> scalableFlags,
+    SmallVectorImpl<std::pair<IREE::CPU::TilingLevel, SmallVector<int64_t>>>
+        &perLevel) {
+  // TODO(egebeysel): wire in distribution tile size alignment logic.
+  if (level == IREE::CPU::TilingLevel::DistributionTiles) {
+    return;
+  }
+  SmallVector<int64_t> alignments(
+      cast<ShapedType>(unpackOp.getDest().getType()).getRank(),
+      static_cast<int64_t>(mlir::InnerTileAlignment::Unknown));
+  bool any = false;
+  for (auto [i, pos] : llvm::enumerate(unpackOp.getInnerDimsPos())) {
+    // Only scalable inner tiles need a hint; static ones are resolved by static
+    // shape inference downstream.
+    if (!unpackSaf.second[i] || pos >= static_cast<int64_t>(tileSizes.size())) {
+      continue;
+    }
+    mlir::InnerTileAlignment kind = getScalableInnerTileAlignment(
+        tileSizes[pos], scalableFlags[pos], unpackSaf.first[i]);
+    alignments[pos] = static_cast<int64_t>(kind);
+    if (kind != mlir::InnerTileAlignment::Unknown) {
+      any = true;
+    }
+  }
+  if (any) {
+    perLevel.emplace_back(level, std::move(alignments));
+  }
+}
+
 void MultiLoweringConfigGenerator::setNewTilingConfigs() {
   SmallVector<IREE::CPU::TilingLevel> tilingLevels;
   tilingLevels.reserve(globalTileSizes.size());
@@ -3850,14 +3890,21 @@ void MultiLoweringConfigGenerator::setNewTilingConfigs() {
         cast<TilingInterface>(op).getLoopIteratorTypes();
     int numLoops = iterTypes.size();
     SmallVector<IREE::CPU::LoweringConfigLevelInfo> newTilingInfo;
-    // Precompute per-tiling-level inner-tile alignment hints for a scalable
-    // pack from the loop tile sizes chosen here. The pack is captured before
-    // `undoScaleAndPermutateTilingForPackOp` divides its (scalable) loop tile
-    // into the packed domain.
+    // Precompute per-tiling-level inner-tile alignment hints for scalable
+    // pack/unpack ops (see capture{Pack,Unpack}InnerTileAlignment) so
+    // `makeInnerTileAlignmentFn` can read them back instead of re-deriving them.
+    // A pack is captured *before* its loop tile is divided into the packed
+    // domain; an unpack *after* its loop tile is scaled up into the unpacked
+    // domain.
     auto packOp = dyn_cast<linalg::PackOp>(op);
+    auto unpackOp = dyn_cast<linalg::UnPackOp>(op);
     std::optional<SizesAndScalableFlags> packSaf;
+    std::optional<SizesAndScalableFlags> unpackSaf;
     if (packOp) {
       packSaf = getScalableTileSizesAndFlags(packOp.getMixedTiles());
+    }
+    if (unpackOp) {
+      unpackSaf = getScalableTileSizesAndFlags(unpackOp.getMixedTiles());
     }
     SmallVector<std::pair<IREE::CPU::TilingLevel, SmallVector<int64_t>>>
         perLevelAlignments;
@@ -3902,8 +3949,7 @@ void MultiLoweringConfigGenerator::setNewTilingConfigs() {
         // `undoScaleAndPermutateTilingForPackOp` to translate the tiling
         // information from the unpacked to the packed dimensions.
         undoScaleAndPermutateTilingForPackOp(packOp, tileSizes, scalableFlags);
-      } else if (auto unpackOp = dyn_cast<linalg::UnPackOp>(op);
-                 unpackOp &&
+      } else if (unpackOp &&
                  level == IREE::CPU::TilingLevel::VectorCommonParallelTiles &&
                  unpackOp.getSource().getDefiningOp<linalg::LinalgOp>()) {
         // The `IterationDimTracker` ties an unpack's destination loops only to
@@ -3913,6 +3959,13 @@ void MultiLoweringConfigGenerator::setNewTilingConfigs() {
         // with the inner tile sizes.
         undoScaleAndPermutateTilingForUnpackOp(unpackOp, tileSizes,
                                                scalableFlags);
+      }
+
+      // Capture this level's alignment for the unpack's scalable inner tiles,
+      // now that the loop tile has been scaled up into the unpacked domain.
+      if (unpackOp && unpackSaf) {
+        captureUnpackInnerTileAlignment(unpackOp, *unpackSaf, level, tileSizes,
+                                        scalableFlags, perLevelAlignments);
       }
 
       // Append tiling info.
